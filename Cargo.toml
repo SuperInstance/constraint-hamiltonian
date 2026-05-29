@@ -1,0 +1,9 @@
+[package]
+name = "constraint-hamiltonian"
+version = "0.1.0"
+edition = "2021"
+description = "Constrained Hamiltonian dynamics with augmented Lagrangian methods"
+
+[lib]
+name = "constraint_hamiltonian"
+path = "src/lib.rs"
