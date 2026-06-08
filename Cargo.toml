@@ -1,4 +1,6 @@
 [package]
+rust-version = "1.70"
+readme = "README.md"
 name = "constraint-hamiltonian"
 version = "0.1.0"
 edition = "2021"
