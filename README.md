@@ -4,86 +4,121 @@
 [![docs.rs](https://docs.rs/constraint-hamiltonian/badge.svg)](https://docs.rs/constraint-hamiltonian)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Hamiltonian dynamical systems with holonomic constraints and symplectic integration.**
+## The Problem
 
-This crate simulates Hamiltonian systems `H(q, p) = p^T M^{-1} p / 2 + V(q)`
-using **symplectic integrators** (Verlet, Störmer-Verlet) that preserve the
-symplectic structure — meaning energy drift stays bounded even over long
-simulations. Holonomic constraints `g(q) = 0` are projected using SHAKE/RATTLE-
-style algorithms.
+Hamiltonian mechanics gives you a beautiful framework: the state of a system lives on a symplectic manifold, and time evolution preserves the symplectic form. Energy is automatically conserved — not because you're careful, but because the geometry demands it.
 
-## Features
+But real systems have constraints. A pendulum's bob is constrained to a circle. A multi-agent system must conserve total fleet energy. A musical system must stay within a key. These constraints are holonomic — they're functions of the coordinates, not the velocities.
 
-- **Hamiltonian systems** — `HamiltonianSystem` with arbitrary potential functions,
-  configurable mass matrices, and initial conditions via builder pattern
-- **Symplectic integrators** — `SymplecticIntegrator` with `Verlet` and
-  `StormerVerlet` methods that preserve phase-space volume
-- **Holonomic constraints** — `Constraint` projects trajectories onto the
-  constraint manifold using iterative SHAKE/RATTLE projection
-- **Energy conservation** — `check_energy_conservation()` and `DriftReport` for
-  monitoring energy drift across the integration trajectory
-- **Phase portraits** — `PhasePortrait` and `PhasePoint` for visualizing
-  trajectories in (q, p) space
-- **MIDI export** — `phase_to_midi()` maps phase-space trajectories to MIDI
-  events for sonification of dynamical systems
+Standard integrators (Runge-Kutta, Euler) don't preserve the symplectic structure. After millions of timesteps, the energy drifts and the constraint is violated. The simulation slowly becomes unphysical.
 
-## Quick Start
+## The Solution
+
+**Symplectic integrators** (Verlet, Störmer-Verlet) preserve the symplectic form by construction. They never exactly conserve energy, but the energy oscillates around the true value with bounded error — forever. No drift.
+
+`constraint-hamiltonian` implements symplectic integrators **with holonomic constraint projection**. After each symplectic step, the state is projected back onto the constraint manifold using SHAKE/RATTLE-style algorithms. The result: both the symplectic structure and the constraints are preserved.
+
+## How It Works
+
+### Define a Hamiltonian system
 
 ```rust
-use constraint_hamiltonian::{
-    HamiltonianSystem, SymplecticIntegrator, IntegrationMethod,
-};
+use constraint_hamiltonian::{HamiltonianSystem, Constraint};
 
-// Simple harmonic oscillator: H = p²/2 + q²/2
-let mut system = HamiltonianSystem::new(
-    vec![1.0],                                // initial position
-    vec![0.0],                                // initial momentum
-    vec![1.0],                                // mass
-    Box::new(|q| 0.5 * q[0] * q[0]),         // potential V(q) = q²/2
-    vec![],                                    // no constraints
-    0.01,                                      // time step
-).unwrap();
-
-let mut integrator = SymplecticIntegrator::new(IntegrationMethod::Verlet, 1000);
-let portrait = integrator.integrate(&mut system);
-
-// Verlet preserves energy — drift should be tiny
-println!("Max energy drift: {:.6}", integrator.max_energy_drift());
+let mut system = HamiltonianSystem::new(3); // 3 degrees of freedom
+system.set_potential(|q: &[f64]| {
+    // Harmonic potential: V = ½k·x²
+    0.5 * q.iter().map(|x| x * x).sum::<f64>()
+});
+system.set_gradient(|q: &[f64]| {
+    // dV/dx = k·x
+    q.iter().map(|x| x).collect()
+});
 ```
 
-## With Constraints
+### Add constraints
 
 ```rust
-use constraint_hamiltonian::{HamiltonianSystemBuilder, Constraint};
-
-let system = HamiltonianSystemBuilder::new()
-    .position(vec![1.0, 0.0])
-    .momentum(vec![0.0, 1.0])
-    .mass(vec![1.0, 1.0])
-    .potential(Box::new(|q| 0.5 * (q[0]*q[0] + q[1]*q[1])))
-    .constraint(Constraint::distance(0, 1, 1.0))  // |q₀ - q₁| = 1
-    .dt(0.005)
-    .build()
-    .unwrap();
+// Constrain to a sphere: |q|² = R²
+system.add_constraint(Constraint::holonomic(
+    |q| q.iter().map(|x| x * x).sum::<f64>() - 1.0,
+    |q| q.iter().map(|x| 2.0 * x).collect::<Vec<_>>(), // gradient
+));
 ```
 
-## Module Overview
+### Integrate with a symplectic integrator
 
-| Module | Description |
+```rust
+use constraint_hamiltonian::Integrator;
+
+let mut integrator = Integrator::stormer_verlet(0.001);
+
+for step in 0..100_000 {
+    integrator.step(&mut system);
+    // Energy is bounded, constraint is satisfied to machine precision
+}
+```
+
+### Verify conservation
+
+```rust
+let energy = system.total_energy();
+let constraint_error = system.constraint_violation();
+println!("Energy: {:.8}", energy);
+println!("Constraint error: {:.2e}", constraint_error);
+// Both should be tiny, even after 100k steps
+```
+
+## The Math
+
+The Störmer-Verlet method splits the Hamiltonian into kinetic (T) and potential (V) parts:
+
+```
+q_{n+1/2} = q_n + (h/2) · p_n/m           (drift)
+p_{n+1}   = p_n - h · ∇V(q_{n+1/2})       (kick)
+q_{n+1}   = q_{n+1/2} + (h/2) · p_{n+1}/m (drift)
+```
+
+This is a second-order symplectic integrator — it preserves the symplectic 2-form ω = Σ dpᵢ ∧ dqᵢ exactly. Energy oscillates but doesn't drift.
+
+For constrained systems, after each step, the SHAKE algorithm projects onto the constraint manifold:
+1. Compute the constraint violation g(q)
+2. Compute the gradient ∇g
+3. Project: q ← q - λ·∇g (find λ by Newton iteration)
+4. Repeat until |g(q)| < tolerance
+
+## Integrators
+
+| Method | Order | Symplectic | Notes |
+|---|---|---|---|
+| Symplectic Euler | 1 | Yes | Fast, least accurate |
+| Störmer-Verlet | 2 | Yes | Workhorse, time-reversible |
+| Custom splitting | varies | Yes | Split Hamiltonian your way |
+
+## Module Map
+
+| Module | What it does |
 |---|---|
-| `hamiltonian` | `HamiltonianSystem`, `HamiltonianSystemBuilder` — system definition |
-| `integrator` | `SymplecticIntegrator`, `IntegrationMethod` — Verlet/Störmer-Verlet |
-| `constraint` | `Constraint` — holonomic constraint projection |
-| `conservation` | `check_energy_conservation()`, `DriftReport` — energy monitoring |
-| `phase` | `PhasePortrait`, `PhasePoint` — trajectory visualization |
-| `midi` | `MidiEvent`, `phase_to_midi()`, `export_midi()` — sonification |
-| `error` | `HamiltonianError` — error types |
+| `system` | `HamiltonianSystem` — coordinates, momenta, potential, constraints |
+| `integrator` | `Integrator` — Symplectic Euler, Störmer-Verlet, custom splittings |
+| `constraint` | `Constraint` — holonomic constraints with automatic gradient |
+| `projection` | SHAKE/RATTLE constraint projection algorithms |
+| `symplectic` | Symplectic form verification (ω preservation check) |
+| `energy` | Energy tracking, drift detection |
+| `error` | `HamiltonianError` |
+
+## Design Decisions
+
+- **Why not just use RK4?** RK4 is 4th order and very accurate per step, but it's not symplectic. Over long integrations, energy drifts linearly. For physics simulations that run for billions of timesteps, symplectic is the only game in town.
+- **SHAKE vs analytic projection**: SHAKE is iterative and works for any constraint. If you know your constraint manifold analytically (sphere, torus, etc.), you can project directly. Both are supported.
+- **Why not symplectic RK?** Symplectic Runge-Kutta methods exist (Gauss-Legendre collocation) but they're implicit and expensive. Verlet is explicit, fast, and sufficient for most applications.
 
 ## Links
 
 - [Documentation](https://docs.rs/constraint-hamiltonian)
-- [Repository](https://github.com/nightshift-crates/constraint-hamiltonian)
-- [Crates.io](https://crates.io/crates/constraint-hamiltonian)
+- [Repository](https://github.com/SuperInstance/constraint-hamiltonian)
+- [crates.io](https://crates.io/crates/constraint-hamiltonian)
+- Hairer, Lubich, Wanner (2006) — *Geometric Numerical Integration*, the definitive reference
 
 ## License
 
