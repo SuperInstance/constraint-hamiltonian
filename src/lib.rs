@@ -1,11 +1,49 @@
-//! Constraint Hamiltonian dynamics
+//! # Constraint Hamiltonian Dynamics
 //!
-//! Implements Hamiltonian mechanics where the potential energy encodes constraint
-//! violations, using Störmer-Verlet integration and augmented Lagrangian methods.
+//! Symplectic integration for constrained systems. Constraints become
+//! conservation laws — the augmented Hamiltonian H = K + V + penalty is
+//! preserved by the Störmer-Verlet integrator, so constraint violations
+//! oscillate with amplitude O(dt²) but never drift.
+//!
+//! ## Quick Start
+//!
+//! ```
+//! use constraint_hamiltonian::{State, Constraint, Hamiltonian};
+//!
+//! let constraint = Constraint::new(
+//!     100.0,
+//!     Box::new(|q: &[f64]| q[0] + q[1] - 1.0),
+//!     Box::new(|_q: &[f64]| vec![1.0, 1.0]),
+//! );
+//!
+//! let h = Hamiltonian::new(
+//!     Box::new(|_q: &[f64], p: &[f64]| 0.5 * p.iter().map(|x| x*x).sum::<f64>()),
+//!     Box::new(|_q: &[f64]| 0.0),
+//!     vec![constraint],
+//! );
+//!
+//! let mut state = State::new(vec![2.0, 2.0], vec![0.0, 0.0]);
+//! for _ in 0..30_000 {
+//!     state = h.step_damped(&state, 0.001, 0.05);
+//! }
+//! println!("Violation: {:.6}", h.constraint_violation(&state));
+//! ```
 
 use std::f64;
 
-/// System state: position q and momentum p.
+/// System state: position q and momentum p in phase space.
+///
+/// The state vector lives in ℝ²ⁿ where n = q.len() = p.len().
+/// Position `q` lives in configuration space; momentum `p` in momentum space.
+///
+/// # Example
+///
+/// ```
+/// use constraint_hamiltonian::State;
+///
+/// let state = State::new(vec![1.0, 0.0], vec![0.0, 1.0]);
+/// assert_eq!(state.dim(), 2);
+/// ```
 #[derive(Clone, Debug)]
 pub struct State {
     pub q: Vec<f64>,
@@ -23,10 +61,27 @@ impl State {
     }
 }
 
-/// A constraint on the system.
+/// A constraint on the system: c(q) = 0 on the constraint surface.
 ///
-/// The constraint function c(q) = 0 defines the constraint surface.
-/// The gradient ∇c(q) is needed for the dynamics.
+/// Constraints are enforced via augmented Lagrangian penalty:
+/// `penalty = ½ w·c(q)² + λ·c(q)`
+///
+/// The gradient ∇c(q) is required for computing forces. The Lagrange multiplier
+/// λ is updated via the augmented Lagrangian method: `λ ← λ + w·c(q)`.
+///
+/// # Example
+///
+/// ```
+/// use constraint_hamiltonian::Constraint;
+///
+/// // Unit circle: q₀² + q₁² = 1
+/// let c = Constraint::new(
+///     100.0,
+///     Box::new(|q: &[f64]| q[0]*q[0] + q[1]*q[1] - 1.0),
+///     Box::new(|q: &[f64]| vec![2.0*q[0], 2.0*q[1]]),
+/// );
+/// assert!((c.value(&[1.0, 0.0])).abs() < 1e-10); // on constraint surface
+/// ```
 pub struct Constraint {
     /// Weight (penalty coefficient) for this constraint.
     pub weight: f64,
